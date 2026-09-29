@@ -60,7 +60,14 @@ func (db *DB) Sync() error {
 	if db.closed {
 		return ErrClosed
 	}
-	return db.wal.sync()
+	if err := db.wal.sync(); err != nil {
+		return err
+	}
+	sz, err := db.wal.size()
+	if err != nil {
+		return err
+	}
+	return writeWatermark(db.dir, sz)
 }
 
 // Put stores value under key. An empty value is a stored empty blob.

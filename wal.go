@@ -1,12 +1,14 @@
 package skiff
 
 import (
+	"encoding/binary"
 	"io"
 	"os"
 	"path/filepath"
 )
 
 const walName = "skiff.wal"
+const okName = "skiff.ok"
 
 type wal struct {
 	path string
@@ -40,6 +42,14 @@ func (w *wal) close() error {
 	return w.f.Close()
 }
 
+func (w *wal) size() (int64, error) {
+	st, err := w.f.Stat()
+	if err != nil {
+		return 0, err
+	}
+	return st.Size(), nil
+}
+
 func (w *wal) truncate(size int64) error {
 	if err := w.f.Truncate(size); err != nil {
 		return err
@@ -48,13 +58,24 @@ func (w *wal) truncate(size int64) error {
 	return err
 }
 
-// readAll returns the full WAL bytes.
 func (w *wal) readAll() ([]byte, error) {
 	return os.ReadFile(w.path)
 }
 
-// rebuildIndexFromWAL replays the log into an in-memory index.
-// An incomplete record at the end of the file is treated as a torn write.
+func writeWatermark(dir string, size int64) error {
+	var buf [8]byte
+	binary.LittleEndian.PutUint64(buf[:], uint64(size))
+	return os.WriteFile(filepath.Join(dir, okName), buf[:], 0o644)
+}
+
+func readWatermark(dir string) (int64, bool) {
+	b, err := os.ReadFile(filepath.Join(dir, okName))
+	if err != nil || len(b) < 8 {
+		return 0, false
+	}
+	return int64(binary.LittleEndian.Uint64(b[:8])), true
+}
+
 func rebuildIndexFromWAL(path string) (*index, int64, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -63,63 +84,29 @@ func rebuildIndexFromWAL(path string) (*index, int64, error) {
 		}
 		return nil, 0, err
 	}
+	dir := filepath.Dir(path)
+	wm, hasWM := readWatermark(dir)
+
+	type applied struct {
+		kind       byte
+		key, value []byte
+		start, end int
+	}
 	idx := newIndex()
 	off := 0
-	type applied struct {
-		kind  byte
-		key   []byte
-		value []byte
-		start int
-		end   int
-	}
 	var log []applied
-	for off < len(b) {
+	limit := len(b)
+	uncertain := false
+	if hasWM && int(wm) >= 0 && int(wm) < len(b) {
+		limit = int(wm)
+		uncertain = true
+	}
+	for off < limit {
 		start := off
 		kind, key, value, next, ok := decodeRecord(b, off)
 		if !ok {
-			validEnd := int64(off)
-			if len(log) > 0 && log[len(log)-1].kind == kindDelete {
-				victim := log[len(log)-1]
-				// Remove the delete's effect: find earlier PUT for same key.
-				var restored []byte
-				found := false
-				for i := len(log) - 2; i >= 0; i-- {
-					if string(log[i].key) != string(victim.key) {
-						continue
-					}
-					if log[i].kind == kindPut {
-						restored = append([]byte(nil), log[i].value...)
-						found = true
-						break
-					}
-					if log[i].kind == kindDelete {
-						found = false
-						restored = nil
-						break
-					}
-				}
-				if found {
-					idx.put(victim.key, restored)
-				} else {
-					_ = restored
-				}
-				validEnd = int64(victim.start)
-				idx = newIndex()
-				o := 0
-				for o < int(validEnd) {
-					knd, k, v, n2, ok2 := decodeRecord(b, o)
-					if !ok2 {
-						break
-					}
-					if knd == kindPut {
-						idx.put(k, v)
-					} else {
-						idx.delete(k)
-					}
-					o = n2
-				}
-			}
-			return idx, validEnd, nil
+			uncertain = true
+			break
 		}
 		if kind == kindPut {
 			idx.put(key, value)
@@ -129,5 +116,24 @@ func rebuildIndexFromWAL(path string) (*index, int64, error) {
 		log = append(log, applied{kind: kind, key: key, value: value, start: start, end: next})
 		off = next
 	}
-	return idx, int64(len(b)), nil
+	validEnd := int64(off)
+	if uncertain && len(log) > 0 {
+		victim := log[len(log)-1]
+		validEnd = int64(victim.start)
+		idx = newIndex()
+		o := 0
+		for o < int(validEnd) {
+			knd, k, v, n2, ok2 := decodeRecord(b, o)
+			if !ok2 {
+				break
+			}
+			if knd == kindPut {
+				idx.put(k, v)
+			} else {
+				idx.delete(k)
+			}
+			o = n2
+		}
+	}
+	return idx, validEnd, nil
 }

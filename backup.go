@@ -6,7 +6,6 @@ import (
 	"os"
 )
 
-// Backup writes a snapshot of the current keyspace to w.
 func (db *DB) Backup(w io.Writer) error {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -14,12 +13,8 @@ func (db *DB) Backup(w io.Writer) error {
 		return ErrClosed
 	}
 	snap := db.idx.snapshot()
-	// header: count u32
 	keys := make([]string, 0, len(snap))
-	for k, v := range snap {
-		if len(v) == 0 {
-			continue
-		}
+	for k := range snap {
 		keys = append(keys, k)
 	}
 	var hdr [4]byte
@@ -45,8 +40,6 @@ func (db *DB) Backup(w io.Writer) error {
 	return nil
 }
 
-// Restore replaces the database contents with a snapshot previously written
-// by Backup. The database must be open; existing keys are cleared first.
 func (db *DB) Restore(r io.Reader) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -73,6 +66,9 @@ func (db *DB) Restore(r io.Reader) error {
 		vb := make([]byte, vlen)
 		if _, err := io.ReadFull(r, vb); err != nil {
 			return err
+		}
+		if vlen == 0 {
+			continue
 		}
 		fresh[string(kb)] = vb
 	}
@@ -106,5 +102,9 @@ func (db *DB) Restore(r io.Reader) error {
 	}
 	db.wal = w
 	db.idx.replace(fresh)
+	st, err := w.size()
+	if err == nil {
+		_ = writeWatermark(db.dir, st)
+	}
 	return nil
 }

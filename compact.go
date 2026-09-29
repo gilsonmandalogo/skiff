@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 )
 
-// Compact rewrites the write-ahead log, dropping obsolete history where possible.
 func (db *DB) Compact() error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -17,27 +16,7 @@ func (db *DB) Compact() error {
 		return err
 	}
 
-	// latest[key] = encoded record bytes of the last record for that key.
-	type slot struct {
-		kind  byte
-		key   []byte
-		value []byte
-	}
-	latest := map[string]slot{}
-	off := 0
-	for off < len(b) {
-		kind, key, value, next, ok := decodeRecord(b, off)
-		if !ok {
-			break
-		}
-		ks := string(key)
-		if kind == kindDelete {
-			off = next
-			continue
-		}
-		latest[ks] = slot{kind: kind, key: key, value: value}
-		off = next
-	}
+	latest := foldLatest(b)
 
 	tmp := filepath.Join(db.dir, "skiff.wal.compact")
 	f, err := os.Create(tmp)
@@ -45,7 +24,7 @@ func (db *DB) Compact() error {
 		return err
 	}
 	for _, s := range latest {
-		rec := encodeRecord(s.kind, s.key, s.value)
+		rec := encodeRecord(kindPut, s.key, s.value)
 		if _, err := f.Write(rec); err != nil {
 			_ = f.Close()
 			_ = os.Remove(tmp)
@@ -75,5 +54,6 @@ func (db *DB) Compact() error {
 	}
 	db.idx = idx
 	_ = db.wal.truncate(size)
+	_ = writeWatermark(db.dir, size)
 	return nil
 }
