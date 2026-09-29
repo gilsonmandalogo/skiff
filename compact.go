@@ -36,7 +36,18 @@ func (db *DB) Compact() error {
 		_ = os.Remove(tmp)
 		return err
 	}
+	st, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
 	_ = f.Close()
+
+	if err := writeWatermark(db.dir, st.Size()); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
 
 	_ = db.wal.close()
 	if err := os.Rename(tmp, db.wal.path); err != nil {

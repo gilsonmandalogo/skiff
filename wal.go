@@ -76,6 +76,26 @@ func readWatermark(dir string) (int64, bool) {
 	return int64(binary.LittleEndian.Uint64(b[:8])), true
 }
 
+// tailIsTorn reports whether b[from:] is not a clean run of complete records
+// ending at EOF (i.e. junk or a partial record remains).
+func tailIsTorn(b []byte, from int) bool {
+	if from < 0 || from > len(b) {
+		return true
+	}
+	if from == len(b) {
+		return false
+	}
+	off := from
+	for off < len(b) {
+		_, _, _, next, ok := decodeRecord(b, off)
+		if !ok {
+			return true
+		}
+		off = next
+	}
+	return false
+}
+
 func rebuildIndexFromWAL(path string) (*index, int64, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -97,10 +117,13 @@ func rebuildIndexFromWAL(path string) (*index, int64, error) {
 	var log []applied
 	limit := len(b)
 	uncertain := false
+
 	if hasWM && int(wm) >= 0 && int(wm) < len(b) {
 		limit = int(wm)
 		uncertain = true
 	}
+	_ = tailIsTorn
+
 	for off < limit {
 		start := off
 		kind, key, value, next, ok := decodeRecord(b, off)
