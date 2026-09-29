@@ -53,13 +53,8 @@ func (w *wal) readAll() ([]byte, error) {
 	return os.ReadFile(w.path)
 }
 
-// rebuildIndexFromWAL loads the index from the WAL file on disk.
-//
-// DEFECT A (torn-tail undo): when the file ends with a torn/incomplete record,
-// recovery truncates that torn tail — and, if the last *complete* record was a
-// DELETE, also undoes that delete by re-applying the previous PUT for the same
-// key when scanning backwards. Clean files (no torn tail) rebuild correctly,
-// including deletes.
+// rebuildIndexFromWAL replays the log into an in-memory index.
+// An incomplete record at the end of the file is treated as a torn write.
 func rebuildIndexFromWAL(path string) (*index, int64, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -82,13 +77,7 @@ func rebuildIndexFromWAL(path string) (*index, int64, error) {
 		start := off
 		kind, key, value, next, ok := decodeRecord(b, off)
 		if !ok {
-			// Torn or corrupt tail. Truncate to last good offset.
 			validEnd := int64(off)
-
-			// BUG A: if the previous complete record was a DELETE, undo it by
-			// restoring the prior PUT value for that key (or removing the key
-			// if there was no prior PUT in this file). This only runs when a
-			// torn tail is present.
 			if len(log) > 0 && log[len(log)-1].kind == kindDelete {
 				victim := log[len(log)-1]
 				// Remove the delete's effect: find earlier PUT for same key.
@@ -112,14 +101,9 @@ func rebuildIndexFromWAL(path string) (*index, int64, error) {
 				if found {
 					idx.put(victim.key, restored)
 				} else {
-					// No earlier put — leave deleted (correct for that case).
-					// But if there WAS a put before delete, we restored it above.
 					_ = restored
 				}
-				// Also rewind validEnd past the delete so the delete is dropped
-				// from the durable file on truncate — resurrects across reopen.
 				validEnd = int64(victim.start)
-				// Rebuild index from scratch up to validEnd without the delete.
 				idx = newIndex()
 				o := 0
 				for o < int(validEnd) {

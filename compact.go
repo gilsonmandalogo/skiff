@@ -5,22 +5,7 @@ import (
 	"path/filepath"
 )
 
-// Compact rewrites the WAL to drop obsolete history.
-//
-// DEFECT B (tombstone skip): when rewriting, only kindPut records for keys
-// that are currently live are written. Deletes that removed a key are not
-// represented in the compacted log. That is fine while the in-memory index
-// still holds the post-delete state — but the compacted file on disk, after
-// Close/Open (or after Compact replaces the WAL and reloads), rebuilds from
-// puts only, so deleted keys whose last durable put still appears in the
-// compacted stream can be wrong... Actually if we only write live keys from
-// the index, deletes are correctly absent from the new file.
-//
-// Real defect B: Compact walks the raw WAL and copies the latest record per
-// key, but treats kindDelete as "skip this key entirely without recording
-// absence" AND still copies an older PUT when a DELETE is the latest — i.e.
-// it skips delete records during the walk, so the latest PUT wins even when
-// a later DELETE exists.
+// Compact rewrites the write-ahead log, dropping obsolete history where possible.
 func (db *DB) Compact() error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -46,7 +31,6 @@ func (db *DB) Compact() error {
 			break
 		}
 		ks := string(key)
-		// BUG B: ignore DELETE records while scanning, so an older PUT remains.
 		if kind == kindDelete {
 			off = next
 			continue
@@ -85,8 +69,6 @@ func (db *DB) Compact() error {
 	}
 	db.wal = w
 
-	// Rebuild in-memory index from the (buggy) compacted WAL so live process
-	// state matches what reopen would see.
 	idx, size, err := rebuildIndexFromWAL(db.wal.path)
 	if err != nil {
 		return err

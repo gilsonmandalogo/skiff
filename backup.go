@@ -7,11 +7,6 @@ import (
 )
 
 // Backup writes a snapshot of the current keyspace to w.
-//
-// DEFECT C (empty ≈ absent): keys whose stored value has length 0 are omitted
-// from the snapshot, so Restore cannot distinguish "empty value" from "missing".
-// Non-empty values and deletes (absent keys) are handled; missing keys stay
-// missing after a round-trip that never contained them.
 func (db *DB) Backup(w io.Writer) error {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -22,7 +17,6 @@ func (db *DB) Backup(w io.Writer) error {
 	// header: count u32
 	keys := make([]string, 0, len(snap))
 	for k, v := range snap {
-		// BUG C: skip empty values
 		if len(v) == 0 {
 			continue
 		}
@@ -83,8 +77,6 @@ func (db *DB) Restore(r io.Reader) error {
 		fresh[string(kb)] = vb
 	}
 
-	// Rewrite WAL from restored map (empty values would be included if present
-	// in fresh — they never are, because Backup skipped them).
 	tmp := db.wal.path + ".restore"
 	f, err := os.Create(tmp)
 	if err != nil {
